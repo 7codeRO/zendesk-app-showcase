@@ -1,0 +1,5 @@
+#!/usr/bin/expect -f
+spawn zat update --path=dist
+expect "*?assword:*"
+send -- "Salata\r"
+expect elf

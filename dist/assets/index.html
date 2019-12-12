@@ -1,0 +1,585 @@
+<html>
+<head>
+    <meta charset="utf-8">
+    <!-- http://garden.zendesk.com -->
+    <link rel="stylesheet" href="https://assets.zendesk.com/apps/sdk-assets/css/2/zendesk_garden.css" type="text/css">
+    <style>
+        @keyframes spinner {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .spinner:before {
+            content: '';
+            box-sizing: border-box;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 60px;
+            height: 60px;
+            margin-top: -30px;
+            margin-left: -30px;
+            border-radius: 50%;
+            border-top: 6px solid #07d;
+            border-right: 6px solid transparent;
+            animation: spinner .6s linear infinite;
+        }
+
+        .action {
+            width: 100%;
+            padding: 10px 10px;
+            border: navajowhite;
+            font-size: 20px;
+            height: auto;
+            margin-top: 15px;
+            color: white;
+        }
+
+        .action1 {
+            background: #1f73b7;
+        }
+
+        .action2 {
+            background: #78a300;
+        }
+
+        .action3 {
+            background: #eb4861;
+        }
+
+        #overlay {
+            position: fixed;
+            display: none;
+            width: 100%;
+            height: 100%;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(0, 0, 0, 0.5);
+            z-index: 2;
+        }
+    </style>
+</head>
+<body>
+<div id="overlay" onclick="off()"></div>
+<h2 class="u-gamma">Manage Users!</h2>
+<div class="actionOneWrapper " id="mySpinner">
+    <button class="action action1" onclick="actionOne()">Approve Users</button>
+    <button class="action action2" onclick="actionTwo()">Sync Tags with Connect</button>
+    <button class="action action3" onclick="actionFour()">Send Connect Events</button>
+</div>
+
+
+<!-- https://github.com/zendesk/zendesk_app_framework_sdk -->
+<script type="text/javascript" src="https://assets.zendesk.com/apps/sdk/2.0/zaf_sdk.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.3.1/jquery.min.js"></script>
+<script src="smtp.js"></script>
+<script>
+
+    // Initialise the Zendesk JavaScript API client
+    var client = ZAFClient.init();
+    client.invoke('resize', {width: '100%', height: '200px'});
+
+    // live
+    var insidersOrgID = 360298632189; // Insiders Organization
+
+    const perPage = 100;
+    const delay = 1000; //ms
+
+    function actionOne() {
+        let query = `type:user tags:insiders_agreed_nda_yes -organization:${insidersOrgID}`;
+        processUsers(query, users => updateManyUsers(getUsersOrganizationTags(users)));
+    }
+
+    function actionTwo() {
+        let query = `type:user organization:${insidersOrgID}`;
+        processUsers(query, users => updateManyUsers(getUsersTags(users)));
+    }
+
+    function actionFour() {
+        let query = `type:user organization:${insidersOrgID}`;
+        processUsers(query, users => getTrackEvents(users).then(events => sendEventsToConnect(events)));
+    }
+
+    function processUsers(query = 'type:user', callback) {
+        jQuery('#mySpinner').addClass('spinner');
+        jQuery("#overlay").show();
+
+        const startPage = 1;
+        let promises = [];
+
+        // const queryString = Object.keys(filters).map(key => key + '=' + filters[key]).join('&');
+        query = encodeURIComponent(query);
+
+        client.request(`/api/v2/search.json?page=1&per_page=1&query=${query}`).then(data => {
+            let usersCount = data.count;
+            let lastRest = usersCount % perPage;
+            let totalReps = (usersCount - lastRest) / perPage + 1;
+            let i;
+            for(i = startPage;  i <= totalReps; i++) {
+                (function(page) {
+                    setTimeout(function () {
+                        var promise = client.request(`/api/v2/search.json?page=${page}&per_page=${perPage}&query=${query}`).then(res => callback(res.results));
+                        promises.push(promise);
+                    }, (page - startPage) * delay);
+                })(i);
+            }
+
+            setTimeout(function(){
+                console.log('it took: ', (totalReps - startPage) * delay, ' ms');
+                Promise.all(promises).then(res => {
+                    jQuery('#mySpinner').removeClass('spinner');
+                    jQuery("#overlay").hide();
+                })
+            }, (totalReps - startPage) * delay);
+
+        }).catch(e => {
+            console.log(e);
+        });
+    }
+
+    function updateManyUsers(users) {
+        console.log('updateManyUsers ', users);
+        if(users.length === 0)
+            return;
+
+        const requestObj = {
+            type: 'PUT',
+            url: '/api/v2/users/update_many.json',
+            contentType: 'application/json',
+            data: JSON.stringify({ users: users }),
+            dataType: 'json'
+        };
+
+        return client.request(requestObj).then(res => res.job_status.url).catch(e => console.log(e));
+    }
+
+    function sendEventsToConnect(events) {
+        console.log(events);
+
+        const startPage = 1;
+        const lastRest = events.length % perPage;
+        const totalReps = (events.length - lastRest) / perPage + 1;
+
+        const connectAPI = 'https://api.outbound.io/v2/track/batch';
+
+        let promises = [];
+
+        for(let i = startPage; i <= totalReps; i++) {
+            (function(page) {
+                setTimeout(function () {
+
+                    const promise = $.ajax({
+                        type: 'POST',
+                        url: connectAPI,
+                        headers: {
+                          'X-Outbound-Key': 'pub-07a9d6082aaed574a6e60fdf4c5d6564'
+                        },
+                        data: JSON.stringify(events)
+                    });
+
+                    promises.push(promise);
+
+                    promise.then(conn => {
+                        console.log('connect response', conn);
+                    })
+                }, (page - startPage) * delay);
+            })(i);
+        }
+
+        return Promise.all(promises);
+    }
+
+    function getTrackEvents(users) {
+
+        let eventName;
+        let events = [];
+
+        const days30ago = new Date(new Date().setDate(new Date().getDate() - 30));
+        const days60ago = new Date(new Date().setDate(new Date().getDate() - 60));
+
+        let promises = [];
+        users.map(user => promises.push(getUserPostsAndComments(user.id)));
+
+        return Promise.all(promises).then(res => {
+
+            let usersLastActivityDate = {};
+            res.map(user => {
+
+                const postsCreatedDates = user.posts.map(post => post.created_at);
+                const commentsCreatedDates = user.comments.map(comment => comment.created_at);
+
+                usersLastActivityDate[user.id] = [...postsCreatedDates, ...commentsCreatedDates].sort((a, b) => new Date(b) - new Date(a))[0];
+            });
+
+            users.map(user => {
+
+                let event = {
+                    user: {
+                        user_id: user.id,
+                        name: user.name,
+                        email: user.email,
+                    },
+                    timestamp: new Date().getTime()
+                };
+
+                if (!user.last_login_at) {
+                    eventName = "Member hasn't logged in yet";
+                } else if (new Date(user.last_login_at) < days60ago) {
+                    eventName = "Member hasn't logged in in 60 days";
+                } else if(new Date(user.last_login_at) < days30ago) {
+                    eventName = "Member hasn't logged in in 30 days";
+                }
+
+                if(eventName) {
+                    event.event = eventName;
+                    events.push(event);
+                }
+
+                if (user.last_login_at) { // check for last post/comment
+
+                    eventName = null;
+                    event = {...event}; // make a new reference of object
+
+                    if(!usersLastActivityDate[user.id]) {
+                        eventName = "Member logged in but hasn't posted yet";
+                    } else if (new Date(usersLastActivityDate[user.id]) < days60ago) {
+                        eventName = "Member logged in but hasn't posted in 60 days";
+                    } else if(new Date(usersLastActivityDate[user.id]) < days30ago) {
+                        eventName = "Member logged in but hasn't posted in 30 days";
+                    }
+
+                    if(eventName) {
+                        event.event = eventName;
+                        events.push(event);
+                    }
+
+                }
+
+            });
+
+            return events;
+        });
+
+    }
+
+    function getUserPostsAndComments(user_id) {
+
+        const postsPromise = client.request(`/api/v2/community/users/${user_id}/posts.json?sort_by=created_at`);
+        const commentsPromise = client.request(`/api/v2/community/users/${user_id}/comments.json?sort_by=created_at`);
+
+        return Promise.all([postsPromise, commentsPromise]).then(res => {
+            const posts = res[0].posts;
+            const comments = res[1].comments;
+
+            return {id: user_id, posts: posts, comments: comments};
+        })
+
+    }
+
+    function getUsersOrganizationTags(users) {
+        let newUsers = [];
+        users.map(user => {
+            if (user.tags.includes("insiders_agreed_nda_yes") && user.organization_id !== insidersOrgID) {
+
+                let userObj = {
+                    id: user.id,
+                    organization_id: insidersOrgID,
+                    tags: [...user.tags, 'insiders_member_yes']
+                };
+                newUsers.push(userObj);
+            }
+        });
+        return newUsers;
+    }
+
+    function getUsersTags(users) {
+
+        var customFields = [
+            {
+                "No": "1",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_android",
+                "Tag": "insiders_android"
+            },
+            {
+                "No": "2",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_ios",
+                "Tag": "insiders_ios"
+            },
+            {
+                "No": "3",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_product_interests_themes_text",
+                "Tag": "insiders_themes_interest"
+            },
+            {
+                "No": "4",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_product_interests_beyond_typing_emoji_stickers_etc_text",
+                "Tag": "insiders_emoji_stickers_etc_interest, insiders_emoji_stickers_gifs__etc_interest"
+            },
+            {
+                "No": "5",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_product_interests_typing_and_predictions_text",
+                "Tag": "insiders_typing_predictions_interest"
+            },
+            {
+                "No": "6",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_product_interests_flow_interest_text",
+                "Tag": "insiders_flow_interest"
+            },
+            {
+                "No": "7",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_product_interests_language_interest_text",
+                "Tag": "insiders_language_interest"
+            },
+            {
+                "No": "8",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_male_text",
+                "Tag": "insiders_male"
+            },
+            {
+                "No": "9",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_female_text",
+                "Tag": "insiders_female"
+            },
+            {
+                "No": "10",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_other_gender_text",
+                "Tag": "insiders_other_gender"
+            },
+            {
+                "No": "11",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_gender_prefer_not_to_answer_text",
+                "Tag": "insiders_prefer_not_to_answer"
+            },
+            {
+                "No": "12",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_signed_nda_text",
+                "Tag": "insiders_agreed_nda_yes, insiders_signed_nda_yes"
+            },
+            {
+                "No": "13",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_news_and_updates_text",
+                "Tag": "insiders_message_yes"
+            },
+            {
+                "No": "14",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_agree_to_terms_of_use_text",
+                "Tag": "insiders_agree_to_terms_of_service_yes"
+            },
+            {
+                "No": "",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_google_play_email_uploaded_no",
+                "Tag": "insiders_play_store_email_upload_no"
+            },
+            {
+                "No": "",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_google_play_email_uploaded_yes",
+                "Tag": "insiders_play_store_email_upload_yes"
+            },
+            {
+                "No": "15",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_country_germany",
+                "Tag": "insiders_country_germany"
+            },
+            {
+                "No": "16",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_country_united_states",
+                "Tag": "insiders_country_united_states"
+            },
+            {
+                "No": "17",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_country_india",
+                "Tag": "insiders_country_india"
+            },
+            {
+                "No": "18",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_country_brazil",
+                "Tag": "insiders_country_brazil"
+            },
+            {
+                "No": "19",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_country_united_kindom",
+                "Tag": "insiders_country_united_states"
+            },
+            {
+                "No": "20",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_country_turkey",
+                "Tag": "insiders_country_turkey"
+            },
+            {
+                "No": "21",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_country_indonesia",
+                "Tag": "nsiders_country_indonesia"
+            },
+            {
+                "No": "22",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_country_russia",
+                "Tag": "insiders_country_russia"
+            },
+            {
+                "No": "23",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_country_france",
+                "Tag": "insiders_country_france"
+            },
+            {
+                "No": "24",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_country_italy",
+                "Tag": "insiders_country_italy"
+            },
+            {
+                "No": "25",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_country_spain",
+                "Tag": "insiders_country_spain"
+            },
+            {
+                "No": "26",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_country_mexico",
+                "Tag": "insiders_country_mexico"
+            },
+            {
+                "No": "27",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_country_poland",
+                "Tag": "insiders_country_poland"
+            },
+            {
+                "No": "28",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_country_columbia",
+                "Tag": "insiders_country_columbia"
+            },
+            {
+                "No": "",
+                "Custom Text Field Name": "",
+                "Custom field field Key": "insiders_country_portugal",
+                "Tag": "insiders_country_portugal"
+            }
+        ];
+
+        let fieldsArr = [];
+        users.forEach(function (e, index) {
+            let fields = {};
+            let has_changes = 0;
+
+            customFields.forEach(function (elem, ind) {
+                if (e.user_fields.hasOwnProperty(elem["Custom field field Key"])){
+                    let tags = elem["Tag"].split(', ');
+                    tags.forEach(function (tag) {
+                        if (e.tags.includes(tag)){
+                            fields[elem["Custom field field Key"]] = tags[0];
+                            has_changes = 1;
+                        }
+                    });
+                }
+            });
+
+            if (has_changes) {
+                fieldsArr[e.id] = fields;
+            }
+
+        });
+
+        return Object.keys(fieldsArr).map(userID => ({ "id": userID, "user_fields": fieldsArr[userID]}));
+
+    }
+
+    function resetPassword(userId, to) {
+        var pass = randomPassword(10);
+        var fetchItem = {
+            url: '/api/v2/users/' + userId + '/password.json',
+            cors: true,
+            type: 'POST',
+            data: {password: pass},
+            dataType: 'json'
+        };
+        var client = ZAFClient.init();
+        client.request(fetchItem).then(function (data) {
+            console.log('password', data);
+            sendMail(pass, to);
+        }).catch( e => {
+            console.log(e);
+        });
+    }
+
+    function setTag(id, currentTags){
+        currentTags.push("insiders_member_yes");
+        var fetchItem = {
+            url: '/api/v2/users/' + id,
+            cors: true,
+            type: 'PUT',
+            data: {
+                user: {
+                    tags: currentTags
+                }
+            },
+            dataType: 'json'
+        };
+        var client = ZAFClient.init();
+        client.request(fetchItem).then(function (data) {
+            console.log('user', data);
+        }).catch( e => {
+            setTag(id, currentTags);
+        });
+    }
+
+    function sendMail(password, to) {
+        var fetchItem = {
+            url: "https://7code.ro/mail_aads32589dfab2403u.php",
+            data: {
+                tkn: '78615Yxw1M559723',
+                pwd: password,
+                to: to
+            },
+            autoRetry: false
+        };
+        var client = ZAFClient.init();
+        client.request(fetchItem).then(function (data) {
+            console.log('sent message')
+        }).catch(e => {
+            console.error("Can't send mail to: " + to);
+        });
+    }
+
+    function randomPassword(length) {
+        var chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP1234567890";
+        var pass = "";
+        for (var x = 0; x < length; x++) {
+            var i = Math.floor(Math.random() * chars.length);
+            pass += chars.charAt(i);
+        }
+        return pass;
+    }
+
+</script>
+</body>
+</html>
