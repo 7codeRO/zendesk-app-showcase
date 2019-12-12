@@ -1,0 +1,21 @@
+{
+  "name": "7code ZAT",
+  "author": {
+    "name": "7code",
+    "email": "office@7code.ro",
+    "url": "https://7code.ro"
+  },
+  "defaultLocale": "en",
+  "private": true,
+  "location": {
+    "support": {
+      "ticket_sidebar": "assets/index.html",
+      "user_sidebar": "assets/index.html"
+    }
+  },
+  "version": "1.0",
+  "frameworkVersion": "2.0",
+
+  "parameters": [
+  ]
+}
